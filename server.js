@@ -196,6 +196,8 @@ app.post('/slack/interactivity', async (req, res) => {
             const issue = await issuePayload.issue;
             
             if (issue) {
+                console.log('🆕 NOVA ISSUE CRIADA:', issue.identifier, '- Estado inicial:', issue.state?.name || 'N/A');
+
                 // Enviar mensagem no Slack
                 const message = await slack.chat.postMessage({
                     channel: channel_id,
@@ -255,10 +257,16 @@ app.post('/slack/interactivity', async (req, res) => {
                 });
 
                 // Salvar estado inicial no cache para detectar mudanças futuras
+                const initialState = issue.state?.name || 'Todo';
                 issueStateCache.set(issue.id, {
-                    name: issue.state?.name || 'Todo',
+                    name: initialState,
                     timestamp: new Date().toISOString()
                 });
+
+                console.log('💾 SALVANDO NO CACHE:');
+                console.log(`Issue ID: ${issue.id}`);
+                console.log(`Estado inicial: ${initialState}`);
+                console.log(`Thread mapeada: Canal ${channel_id}, TS ${message.ts}`);
 
                 console.log(`✅ Landing page request ${issue.identifier} criado com formulário personalizado`);
             }
@@ -274,167 +282,218 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear - APENAS notificar ao entrar em In Progress, In Review ou Done
+// Webhook do Linear - SUPER DEBUG
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data, updatedFrom, action } = req.body;
-        console.log('Webhook Linear recebido:', type);
-
-        // LOG COMPLETO DO PAYLOAD PARA DEBUG
-        console.log('=== DEBUG WEBHOOK COMPLETO ===');
-        console.log('Action:', action);
-        console.log('Data issue state:', data?.state ? `${data.state.name} (pos: ${data.state.position})` : 'null');
-        console.log('UpdatedFrom state:', updatedFrom?.state ? `${updatedFrom.state.name} (pos: ${updatedFrom.state.position})` : 'null');
-        console.log('UpdatedFrom completo:', JSON.stringify(updatedFrom, null, 2));
-        console.log('===============================');
+        console.log('===========================');
+        console.log('🎯 WEBHOOK LINEAR RECEBIDO');
+        console.log('===========================');
 
         if (type === 'Issue' && data) {
             const issue = data;
             
+            console.log('📋 DADOS DA ISSUE:');
+            console.log(`ID: ${issue.id}`);
+            console.log(`Identifier: ${issue.identifier}`);
+            console.log(`Title: ${issue.title}`);
+            console.log(`State: ${issue.state?.name || 'N/A'}`);
+            console.log(`Team: ${issue.team?.name} (${issue.team?.key})`);
+            
             // FILTRAR: Apenas issues do team Landing Pages
             if (issue.team && issue.team.key !== 'LAN') {
-                console.log(`🔄 Issue ${issue.identifier} é do team "${issue.team.name}" (${issue.team.key}), ignorando (só processar LAN)`);
+                console.log(`❌ IGNORANDO: Issue é do team "${issue.team.name}" (${issue.team.key}), não LAN`);
                 res.status(200).send('OK');
                 return;
             }
 
-            console.log(`✅ Issue ${issue.identifier} é do team Landing Pages, processando...`);
+            console.log('✅ ISSUE É DO TEAM LANDING PAGES - PROCESSANDO...');
             
             const threadInfo = issueThreadMap.get(issue.id);
+            
+            console.log('🔍 VERIFICAÇÃO DE MAPEAMENTO:');
+            console.log(`Issue ${issue.identifier} está mapeada?`, !!threadInfo);
+            if (threadInfo) {
+                console.log(`Canal: ${threadInfo.channel}, Thread: ${threadInfo.ts}`);
+            }
 
-            // Verificar mudança de estado - APENAS notificar em In Progress, In Review e Done
-            if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
+            // DEBUG: Mostrar estado atual do cache antes de processar
+            console.log('💾 ESTADO ATUAL DO CACHE:');
+            console.log(`Issue ${issue.identifier} no cache:`, issueStateCache.get(issue.id) || 'NÃO EXISTE');
+            console.log('Cache completo:', Array.from(issueStateCache.entries()).map(([id, state]) => ({
+                id,
+                name: state.name,
+                timestamp: state.timestamp
+            })));
+            
+            console.log('📡 DADOS DO WEBHOOK:');
+            console.log(`Action: ${action}`);
+            console.log(`Type: ${type}`);
+            console.log(`UpdatedFrom exists: ${!!updatedFrom}`);
+            console.log(`UpdatedFrom.state: ${updatedFrom?.state?.name || 'NULL'}`);
+
+            // Verificar mudança de estado usando CACHE LOCAL
+            if (threadInfo && issue.state) {
                 const currentState = issue.state.name;
-                const previousState = updatedFrom.state.name;
+                let previousState = null;
+                let isFirstTime = false;
+                let detectionMethod = '';
 
-                console.log(`Estado anterior: "${previousState}" → Estado atual: "${currentState}"`);
+                console.log('🔄 DETECTANDO MUDANÇA DE ESTADO:');
+                console.log(`Estado atual: "${currentState}"`);
 
-                // Definir posições dos estados (ordem do workflow)
-                const stateOrder = {
-                    'todo': 1,
-                    'in progress': 2, 
-                    'in review': 3,
-                    'done': 4
-                };
-
-                // Função para obter posição do estado
-                const getStatePosition = (stateName) => {
-                    const normalizedState = stateName.toLowerCase().trim();
-                    return stateOrder[normalizedState] || 0;
-                };
-
-                const previousPosition = getStatePosition(previousState);
-                const currentPosition = getStatePosition(currentState);
-
-                console.log(`Posição anterior: ${previousPosition} → Posição atual: ${currentPosition}`);
-
-                // REGRAS ESPECÍFICAS: só notificar se ENTRAR em In Progress, In Review ou Done
-                const shouldNotify = (
-                    currentPosition > previousPosition && // Movimento para frente
-                    currentPosition >= 2 && // Estado atual é In Progress (2), In Review (3) ou Done (4)
-                    previousPosition > 0 && currentPosition > 0 // Estados válidos
-                );
-
-                if (shouldNotify) {
-                    let emoji = '🚀';
-                    let actionText = 'progrediu';
-                    
-                    // Emojis específicos para cada estado de destino
-                    if (currentState.toLowerCase() === 'in progress') {
-                        emoji = '🚀';
-                        actionText = 'entrou em desenvolvimento';
-                    } else if (currentState.toLowerCase() === 'in review') {
-                        emoji = '👀';
-                        actionText = 'entrou em revisão';
-                    } else if (currentState.toLowerCase() === 'done') {
-                        emoji = '✅';
-                        actionText = 'foi concluída';
-                    }
-
-                    const updateText = `*Status atualizado para:* ${currentState}`;
-
-                    let additionalInfo = '';
-                    if (issue.assignee) {
-                        additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
-                    }
-
-                    await slack.chat.postMessage({
-                        channel: threadInfo.channel,
-                        thread_ts: threadInfo.ts,
-                        text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`,
-                        blocks: [
-                            {
-                                type: 'section',
-                                text: {
-                                    type: 'mrkdwn',
-                                    text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`
-                                }
-                            },
-                            {
-                                type: 'context',
-                                elements: [
-                                    {
-                                        type: 'mrkdwn',
-                                        text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR')}`
-                                    }
-                                ]
-                            }
-                        ]
-                    });
-
-                    console.log(`✅ Notificação enviada: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition}) - ${actionText}`);
-                } else if (currentPosition < previousPosition) {
-                    console.log(`⬅️ Movimento para trás detectado, NÃO notificando: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition})`);
-                } else if (currentPosition < 2) {
-                    console.log(`ℹ️ Movimento para estado inicial (${currentState}), não notificando`);
+                // Tentar pegar estado anterior do Linear primeiro
+                if (updatedFrom && updatedFrom.state) {
+                    previousState = updatedFrom.state.name;
+                    detectionMethod = '📡 Linear webhook';
+                    console.log(`${detectionMethod}: "${previousState}"`);
+                } 
+                // Fallback: usar cache local
+                else if (issueStateCache.has(issue.id)) {
+                    const cachedState = issueStateCache.get(issue.id);
+                    previousState = cachedState.name;
+                    detectionMethod = '💾 Cache local';
+                    console.log(`${detectionMethod}: "${previousState}"`);
                 } else {
-                    console.log(`ℹ️ Movimento não atende critérios de notificação: "${previousState}" → "${currentState}"`);
+                    // Primeira vez - assumir que veio de "Todo"
+                    if (currentState.toLowerCase() !== 'todo') {
+                        previousState = 'Todo';
+                        isFirstTime = true;
+                        detectionMethod = '🆕 Primeira detecção (assumindo Todo)';
+                        console.log(`${detectionMethod}: "${previousState}"`);
+                    }
                 }
-            } 
-            // Casos onde NÃO notifica
-            else if (threadInfo && !updatedFrom) {
-                console.log(`ℹ️ Issue ${issue.identifier} - webhook sem 'updatedFrom', não é mudança de estado`);
-            }
-            else if (threadInfo && !updatedFrom?.state) {
-                console.log(`ℹ️ Issue ${issue.identifier} - updatedFrom existe mas sem 'state', não é mudança de estado`);
-            }
-            // Notificar atribuições
-            else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
-                await slack.chat.postMessage({
-                    channel: threadInfo.channel,
-                    thread_ts: threadInfo.ts,
-                    text: `👤 *Tarefa ${threadInfo.identifier} foi atribuída:*\n*Assignee:* ${issue.assignee.name}`,
-                    blocks: [
-                        {
-                            type: 'section',
-                            text: {
-                                type: 'mrkdwn',
-                                text: `👤 *Tarefa ${threadInfo.identifier} foi atribuída:*\n*Assignee:* ${issue.assignee.name}`
-                            }
-                        },
-                        {
-                            type: 'context',
-                            elements: [
+
+                if (previousState && (previousState !== currentState || isFirstTime)) {
+                    console.log('📊 COMPARAÇÃO DE ESTADOS:');
+                    console.log(`"${previousState}" → "${currentState}"`);
+
+                    // Definir posições dos estados (ordem do workflow)
+                    const stateOrder = {
+                        'todo': 1,
+                        'in progress': 2, 
+                        'in review': 3,
+                        'done': 4
+                    };
+
+                    // Função para obter posição do estado
+                    const getStatePosition = (stateName) => {
+                        const normalizedState = stateName.toLowerCase().trim();
+                        return stateOrder[normalizedState] || 0;
+                    };
+
+                    const previousPosition = getStatePosition(previousState);
+                    const currentPosition = getStatePosition(currentState);
+
+                    console.log(`Posição anterior: ${previousPosition} → Posição atual: ${currentPosition}`);
+
+                    // REGRAS ESPECÍFICAS: só notificar se ENTRAR em In Progress, In Review ou Done
+                    const shouldNotify = (
+                        currentPosition > previousPosition && // Movimento para frente
+                        currentPosition >= 2 && // Estado atual é In Progress (2), In Review (3) ou Done (4)
+                        previousPosition > 0 && currentPosition > 0 // Estados válidos
+                    );
+
+                    console.log('⚖️ AVALIAÇÃO DAS REGRAS:');
+                    console.log(`Movimento para frente? ${currentPosition > previousPosition}`);
+                    console.log(`Estado atual é notificável? ${currentPosition >= 2} (precisa ser >= 2)`);
+                    console.log(`Estados válidos? ${previousPosition > 0 && currentPosition > 0}`);
+                    console.log(`RESULTADO: ${shouldNotify ? '✅ DEVE NOTIFICAR' : '❌ NÃO DEVE NOTIFICAR'}`);
+
+                    if (shouldNotify) {
+                        let emoji = '🚀';
+                        let actionText = 'progrediu';
+                        
+                        // Emojis específicos para cada estado de destino
+                        if (currentState.toLowerCase() === 'in progress') {
+                            emoji = '🚀';
+                            actionText = 'entrou em desenvolvimento';
+                        } else if (currentState.toLowerCase() === 'in review') {
+                            emoji = '👀';
+                            actionText = 'entrou em revisão';
+                        } else if (currentState.toLowerCase() === 'done') {
+                            emoji = '✅';
+                            actionText = 'foi concluída';
+                        }
+
+                        const updateText = `*Status atualizado para:* ${currentState}`;
+
+                        let additionalInfo = '';
+                        if (issue.assignee) {
+                            additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
+                        }
+
+                        console.log('📤 ENVIANDO NOTIFICAÇÃO PARA SLACK:');
+                        console.log(`Canal: ${threadInfo.channel}`);
+                        console.log(`Thread: ${threadInfo.ts}`);
+                        console.log(`Mensagem: ${emoji} ${actionText}`);
+
+                        await slack.chat.postMessage({
+                            channel: threadInfo.channel,
+                            thread_ts: threadInfo.ts,
+                            text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`,
+                            blocks: [
                                 {
-                                    type: 'mrkdwn',
-                                    text: `<${issue.url}|Ver no Linear> | Atribuído em ${new Date().toLocaleString('pt-BR')}`
+                                    type: 'section',
+                                    text: {
+                                        type: 'mrkdwn',
+                                        text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`
+                                    }
+                                },
+                                {
+                                    type: 'context',
+                                    elements: [
+                                        {
+                                            type: 'mrkdwn',
+                                            text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR')}`
+                                        }
+                                    ]
                                 }
                             ]
-                        }
-                    ]
-                });
+                        });
 
-                console.log(`✅ Notificação de atribuição enviada para ${issue.assignee.name}`);
-            }
-            // Issue não mapeada
+                        console.log(`✅ NOTIFICAÇÃO ENVIADA COM SUCESSO!`);
+                        console.log(`"${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition}) - ${actionText}`);
+                    } else if (currentPosition < previousPosition) {
+                        console.log(`⬅️ MOVIMENTO REVERSO - NÃO NOTIFICANDO: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition})`);
+                    } else if (currentPosition < 2) {
+                        console.log(`ℹ️ MOVIMENTO PARA ESTADO INICIAL - NÃO NOTIFICANDO: "${currentState}"`);
+                    } else {
+                        console.log(`ℹ️ MOVIMENTO NÃO ATENDE CRITÉRIOS: "${previousState}" → "${currentState}"`);
+                    }
+                } else if (!previousState) {
+                    console.log(`ℹ️ ESTADO INICIAL DETECTADO: "${currentState}"`);
+                } else {
+                    console.log(`ℹ️ ESTADO NÃO MUDOU: "${currentState}"`);
+                }
+
+                // SEMPRE atualizar cache com estado atual para próxima comparação
+                console.log('💾 ATUALIZANDO CACHE:');
+                console.log(`Issue ID: ${issue.id}`);
+                console.log(`Novo estado: ${currentState}`);
+                issueStateCache.set(issue.id, {
+                    name: currentState,
+                    timestamp: new Date().toISOString()
+                });
+                console.log('✅ Cache atualizado');
+            } 
+            // Casos onde NÃO processa mudança de estado
             else if (!threadInfo) {
-                console.log(`ℹ️ Issue ${issue.identifier} não está mapeada (não foi criada via Slack)`);
+                console.log(`ℹ️ Issue ${issue.identifier} NÃO ESTÁ MAPEADA (não foi criada via Slack)`);
+            } else if (!issue.state) {
+                console.log(`ℹ️ Issue ${issue.identifier} SEM ESTADO DEFINIDO`);
             }
+        } else {
+            console.log('ℹ️ Webhook não é do tipo Issue ou sem dados');
         }
+
+        console.log('===========================');
+        console.log('🏁 PROCESSAMENTO FINALIZADO');
+        console.log('===========================');
 
         res.status(200).send('OK');
     } catch (error) {
-        console.error('Erro no webhook:', error);
+        console.error('❌ ERRO NO WEBHOOK:', error);
         res.status(500).send('Erro interno');
     }
 });
@@ -444,6 +503,7 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         mappedIssues: issueThreadMap.size,
+        cachedStates: issueStateCache.size,
         timestamp: new Date().toISOString()
     });
 });
@@ -454,7 +514,11 @@ app.get('/debug/mappings', (req, res) => {
         issueId: id,
         ...info
     }));
-    res.json(mappings);
+    const cache = Array.from(issueStateCache.entries()).map(([id, state]) => ({
+        issueId: id,
+        ...state
+    }));
+    res.json({ mappings, cache });
 });
 
 const PORT = process.env.PORT || 3000;
