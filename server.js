@@ -267,16 +267,34 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear - com detecção automática de progresso
+// Webhook do Linear - filtrar apenas Landing Pages e debug completo
 app.post('/webhook/linear', async (req, res) => {
     try {
-        const { type, data, updatedFrom } = req.body;
-        console.log('Webhook Linear recebido:', type);
+        const { type, data, updatedFrom, action } = req.body;
+        
+        // LOG COMPLETO do payload para debug
+        console.log('=== WEBHOOK LINEAR COMPLETO ===');
+        console.log('Type:', type);
+        console.log('Action:', action);
+        console.log('Data completa:', JSON.stringify(data, null, 2));
+        console.log('UpdatedFrom completa:', JSON.stringify(updatedFrom, null, 2));
+        console.log('================================');
 
         if (type === 'Issue' && data) {
             const issue = data;
+            
+            // FILTRAR: Apenas issues do team Landing Pages
+            if (issue.team && issue.team.key !== 'LAN') {
+                console.log(`🔄 Issue ${issue.identifier} é do team "${issue.team.name}" (${issue.team.key}), ignorando (só processar LAN)`);
+                res.status(200).send('OK');
+                return;
+            }
+
+            console.log(`✅ Issue ${issue.identifier} é do team Landing Pages, processando...`);
+
             const threadInfo = issueThreadMap.get(issue.id);
 
+            // Se a issue tem mudança de estado
             if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
                 const currentStatePosition = issue.state.position;
                 const previousStatePosition = updatedFrom.state.position;
@@ -337,8 +355,9 @@ app.post('/webhook/linear', async (req, res) => {
                 } else {
                     console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${updatedFrom.state.name}" → "${issue.state.name}"`);
                 }
-            } else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
-                // Notificar apenas quando alguém é ATRIBUÍDO pela primeira vez
+            } 
+            // Se a issue foi atribuída
+            else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
                 await slack.chat.postMessage({
                     channel: threadInfo.channel,
                     thread_ts: threadInfo.ts,
@@ -364,8 +383,15 @@ app.post('/webhook/linear', async (req, res) => {
                 });
 
                 console.log(`✅ Notificação de atribuição enviada para ${issue.assignee.name}`);
-            } else if (!threadInfo) {
+            }
+            // Issue não está mapeada 
+            else if (!threadInfo) {
                 console.log(`ℹ️ Issue ${issue.identifier} não está mapeada (não foi criada via Slack)`);
+            }
+            // Outros casos
+            else {
+                console.log(`ℹ️ Issue ${issue.identifier} - webhook recebido mas sem ação necessária`);
+                console.log('Motivo: updatedFrom ou state ausentes, ou não é mudança relevante');
             }
         }
 
