@@ -236,9 +236,13 @@ app.post('/slack/interactivity', async (req, res) => {
                 const threadUrl = `https://${slackTeamInfo.team.domain}.slack.com/archives/${channel_id}/p${message.ts.replace('.', '')}`;
 
                 // Atualizar descrição da issue com link da thread
+                const updatedDescription = fullDescription + `\n\n**Thread no Slack:** ${threadUrl}`;
+                
                 await linear.updateIssue(issue.id, {
-                    description: fullDescription + `\n\n**Thread no Slack:** ${threadUrl}`
+                    description: updatedDescription
                 });
+
+                console.log('✅ Link da thread adicionado na descrição:', threadUrl);
 
                 // Salvar mapeamento
                 issueThreadMap.set(issue.id, {
