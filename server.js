@@ -3,7 +3,10 @@ const { WebClient } = require('@slack/web-api');
 const { LinearClient } = require('@linear/sdk');
 
 const app = express();
-app.use(express.json());
+
+// CORREÇÃO: Parser para dados do Slack (form-encoded) E JSON (para Linear)
+app.use(express.json()); // Para webhooks do Linear
+app.use(express.urlencoded({ extended: true })); // Para comandos do Slack
 
 // Configurações
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || 'xoxb-your-slack-bot-token';
@@ -14,43 +17,29 @@ const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
 
 const issueThreadMap = new Map();
 
-// Comando Slack com MUITO debug
+// Comando Slack com debug
 app.post('/slack/commands/create-task', async (req, res) => {
     try {
-        // LOG COMPLETO do que chegou
         console.log('=== COMANDO SLACK RECEBIDO ===');
         console.log('Body completo:', JSON.stringify(req.body, null, 2));
         console.log('req.body.text:', req.body.text);
-        console.log('Tipo do text:', typeof req.body.text);
-        console.log('Length do text:', req.body.text ? req.body.text.length : 'undefined');
-        console.log('Text após trim:', req.body.text ? `"${req.body.text.trim()}"` : 'undefined');
         console.log('================================');
 
         const { text, user_id, channel_id } = req.body;
         
-        // Validação com mais detalhes
-        if (!text) {
-            console.log('❌ Erro: text é undefined/null');
+        if (!text || text.trim() === '') {
             return res.json({
                 response_type: 'ephemeral',
-                text: 'DEBUG: Campo text está undefined/null. Por favor tente: `/create-task Implementar nova feature`'
-            });
-        }
-        
-        if (text.trim() === '') {
-            console.log('❌ Erro: text está vazio após trim');
-            return res.json({
-                response_type: 'ephemeral',
-                text: 'DEBUG: Campo text está vazio. Por favor tente: `/create-task Implementar nova feature`'
+                text: 'Por favor, forneça um título para a tarefa. Exemplo: `/create-task Implementar nova feature`'
             });
         }
 
-        console.log('✅ Validação passou! Text:', `"${text.trim()}"`);
+        console.log('✅ Texto recebido:', `"${text.trim()}"`);
 
         // Resposta imediata
         res.json({
             response_type: 'in_channel',
-            text: `✅ DEBUG: Criando tarefa: "${text.trim()}"... (Length: ${text.trim().length})`
+            text: `Criando tarefa: "${text.trim()}"...`
         });
 
         // Obter informações do usuário
@@ -69,6 +58,8 @@ app.post('/slack/commands/create-task', async (req, res) => {
             return;
         }
 
+        console.log('✅ Criando issue no Linear...');
+
         // Criar issue no Linear
         const issuePayload = await linear.createIssue({
             teamId: firstTeam.id,
@@ -79,6 +70,8 @@ app.post('/slack/commands/create-task', async (req, res) => {
         const issue = await issuePayload.issue;
         
         if (issue) {
+            console.log('✅ Issue criada:', issue.identifier);
+
             // Enviar mensagem no Slack com detalhes da tarefa
             const message = await slack.chat.postMessage({
                 channel: channel_id,
@@ -115,11 +108,11 @@ app.post('/slack/commands/create-task', async (req, res) => {
                 identifier: issue.identifier
             });
 
-            console.log(`✅ Tarefa ${issue.identifier} criada e mapeada!`);
+            console.log(`✅ Tarefa ${issue.identifier} criada e mapeada para thread ${message.ts}`);
         }
 
     } catch (error) {
-        console.error('❌ ERRO COMPLETO:', error);
+        console.error('❌ ERRO:', error);
         
         try {
             await slack.chat.postMessage({
@@ -132,7 +125,7 @@ app.post('/slack/commands/create-task', async (req, res) => {
     }
 });
 
-// Webhook do Linear (inalterado)
+// Webhook do Linear
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data } = req.body;
