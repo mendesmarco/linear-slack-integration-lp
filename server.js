@@ -46,16 +46,28 @@ app.post('/slack/commands/create-task', async (req, res) => {
         const userInfo = await slack.users.info({ user: user_id });
         const userName = userInfo.user.real_name || userInfo.user.name;
 
-        // Usar o ID do team Landing Pages diretamente (mais eficiente)
-        const LANDING_PAGES_TEAM_ID = 'LAN'; // ID do team Landing Pages
-        
-        console.log('✅ Usando team Landing Pages (ID:', LANDING_PAGES_TEAM_ID, ')');
+        // Buscar team Landing Pages por identificador
+        const teams = await linear.teams();
+        const landingPagesTeam = teams.nodes.find(team => 
+            team.name === 'Landing Pages' || team.key === 'LAN'
+        );
+
+        if (!landingPagesTeam) {
+            console.log('Teams disponíveis:', teams.nodes.map(t => `${t.name} (${t.key})`).join(', '));
+            await slack.chat.postMessage({
+                channel: channel_id,
+                text: `❌ Erro: Team "Landing Pages" não encontrado nos primeiros resultados. Pode estar em páginas seguintes da API.`
+            });
+            return;
+        }
+
+        console.log('✅ Team encontrado:', landingPagesTeam.name, 'ID:', landingPagesTeam.id);
 
         console.log('✅ Criando issue no Linear...');
 
         // Criar issue no Linear no team Landing Pages
         const issuePayload = await linear.createIssue({
-            teamId: LANDING_PAGES_TEAM_ID,
+            teamId: landingPagesTeam.id,
             title: text.trim(),
             description: `Criada via Slack por ${userName}`
         });
