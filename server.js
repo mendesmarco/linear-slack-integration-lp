@@ -290,9 +290,11 @@ app.post('/slack/interactivity', async (req, res) => {
             console.log(`Aprovando tarefa ${identifier} por ${user.name}`);
 
             try {
+                // Buscar issue para pegar informações do team
+                const issueData = await linear.issue(issueId);
+                
                 // Buscar estados do team para encontrar "Done"
-                const issue = await linear.issue(issueId);
-                const team = await linear.team(issue.team.id);
+                const team = await linear.team(issueData.team.id);
                 const states = await team.states();
                 
                 const doneState = states.nodes.find(state => 
@@ -448,8 +450,14 @@ app.post('/webhook/linear', async (req, res) => {
                         if (issue.assignee) {
                             additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
                         }
-                        // Mencionar o usuário que criou a task
-                        additionalInfo += `\n*Solicitado por:* ${threadInfo.createdByHandle}`;
+                        
+                        // Para In Progress, mostrar quem atribuiu se houver assignee
+                        if (currentState.toLowerCase() === 'in progress' && issue.assignee) {
+                            additionalInfo += `\n*Atribuído para desenvolvimento*`;
+                        }
+                        
+                        // Mencionar o usuário que criou a task (sem "Solicitado por")
+                        additionalInfo += `\n${threadInfo.createdByHandle}`;
 
                         // Criar botões específicos para In Review
                         let actionElements = [];
