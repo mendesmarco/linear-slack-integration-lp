@@ -14,6 +14,7 @@ const slack = new WebClient(SLACK_BOT_TOKEN);
 const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
 
 const issueThreadMap = new Map();
+const issueStateCache = new Map(); // Cache para armazenar estados anteriores
 
 // Comando Slack - abre formulário
 app.post('/slack/commands/create-task', async (req, res) => {
@@ -244,13 +245,19 @@ app.post('/slack/interactivity', async (req, res) => {
 
                 console.log('✅ Link da thread adicionado na descrição:', threadUrl);
 
-                // Salvar mapeamento
+                // Salvar mapeamento E estado inicial no cache
                 issueThreadMap.set(issue.id, {
                     channel: channel_id,
                     ts: message.ts,
                     issueId: issue.id,
                     identifier: issue.identifier,
                     threadUrl: threadUrl
+                });
+
+                // Salvar estado inicial no cache para detectar mudanças futuras
+                issueStateCache.set(issue.id, {
+                    name: issue.state?.name || 'Todo',
+                    timestamp: new Date().toISOString()
                 });
 
                 console.log(`✅ Landing page request ${issue.identifier} criado com formulário personalizado`);
