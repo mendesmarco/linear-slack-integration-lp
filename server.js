@@ -231,9 +231,11 @@ app.post('/slack/interactivity', async (req, res) => {
                     ]
                 });
 
-                // Construir link da thread do Slack
-                const slackTeamInfo = await slack.team.info();
-                const threadUrl = `https://${slackTeamInfo.team.domain}.slack.com/archives/${channel_id}/p${message.ts.replace('.', '')}`;
+                // Construir link da thread do Slack (sem precisar de team:read)
+                // Usar formato padrão: workspace extraído da URL ou configuração
+                const channelInfo = await slack.conversations.info({ channel: channel_id });
+                const workspaceName = 'infinitepay'; // Substitua pelo nome do seu workspace
+                const threadUrl = `https://${workspaceName}.slack.com/archives/${channel_id}/p${message.ts.replace('.', '')}`;
 
                 // Atualizar descrição da issue com link da thread
                 const updatedDescription = fullDescription + `\n\n**Thread no Slack:** ${threadUrl}`;
@@ -267,47 +269,115 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear (inalterado)
+// Webhook do Linear - com lógica de progresso
 app.post('/webhook/linear', async (req, res) => {
     try {
-        const { type, data } = req.body;
+        const { type, data, updatedFrom } = req.body;
         console.log('Webhook Linear recebido:', type);
 
         if (type === 'Issue' && data) {
             const issue = data;
             const threadInfo = issueThreadMap.get(issue.id);
 
-            if (threadInfo) {
-                let updateText = '';
-                let emoji = '🔄';
+            if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
+                const currentState = issue.state.name.toLowerCase();
+                const previousState = updatedFrom.state.name.toLowerCase();
 
-                if (issue.state) {
-                    const stateName = issue.state.name;
-                    if (stateName.toLowerCase().includes('done') || stateName.toLowerCase().includes('completed')) {
-                        emoji = '✅';
-                        updateText = `*Status atualizado para:* ${stateName}`;
-                    } else if (stateName.toLowerCase().includes('progress') || stateName.toLowerCase().includes('doing')) {
-                        emoji = '🚀';
-                        updateText = `*Status atualizado para:* ${stateName}`;
-                    } else {
-                        updateText = `*Status atualizado para:* ${stateName}`;
+                console.log(`Estado anterior: ${previousState} → Estado atual: ${currentState}`);
+
+                // Definir ordem dos estados (esquerda para direita)
+                const stateOrder = {
+                    'todo': 1,
+                    'to do': 1,
+                    'backlog': 1,
+                    'in progress': 2,
+                    'doing': 2,
+                    'in review': 3,
+                    'review': 3,
+                    'testing': 4,
+                    'done': 5,
+                    'completed': 5,
+                    'closed': 5
+                };
+
+                // Função para obter posição do estado
+                const getStatePosition = (stateName) => {
+                    const normalizedState = stateName.toLowerCase().trim();
+                    for (const [key, position] of Object.entries(stateOrder)) {
+                        if (normalizedState.includes(key)) {
+                            return position;
+                        }
                     }
-                }
+                    return 0; // Estado desconhecido
+                };
 
-                if (issue.assignee) {
-                    updateText += `\n*Assignee:* ${issue.assignee.name}`;
-                }
+                const previousPosition = getStatePosition(previousState);
+                const currentPosition = getStatePosition(currentState);
 
+                console.log(`Posição anterior: ${previousPosition}, Posição atual: ${currentPosition}`);
+
+                // Só notificar se houve PROGRESSO (movimento para direita)
+                if (currentPosition > previousPosition && previousPosition > 0 && currentPosition > 0) {
+                    let emoji = '🚀';
+                    
+                    // Emojis específicos para cada transição
+                    if (currentState.includes('progress') || currentState.includes('doing')) {
+                        emoji = '🚀';
+                    } else if (currentState.includes('review')) {
+                        emoji = '👀';
+                    } else if (currentState.includes('testing')) {
+                        emoji = '🧪';
+                    } else if (currentState.includes('done') || currentState.includes('completed')) {
+                        emoji = '✅';
+                    }
+
+                    const updateText = `*Status atualizado para:* ${issue.state.name}`;
+
+                    let additionalInfo = '';
+                    if (issue.assignee) {
+                        additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
+                    }
+
+                    await slack.chat.postMessage({
+                        channel: threadInfo.channel,
+                        thread_ts: threadInfo.ts,
+                        text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`,
+                        blocks: [
+                            {
+                                type: 'section',
+                                text: {
+                                    type: 'mrkdwn',
+                                    text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`
+                                }
+                            },
+                            {
+                                type: 'context',
+                                elements: [
+                                    {
+                                        type: 'mrkdwn',
+                                        text: `<${issue.url}|Ver no Linear> | ${previousState} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
+                                    }
+                                ]
+                            }
+                        ]
+                    });
+
+                    console.log(`✅ Notificação de progresso enviada: ${previousState} → ${currentState}`);
+                } else {
+                    console.log(`⏸️ Movimento não é progresso, não notificando: ${previousState} → ${currentState}`);
+                }
+            } else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
+                // Notificar apenas quando alguém é ATRIBUÍDO pela primeira vez
                 await slack.chat.postMessage({
                     channel: threadInfo.channel,
                     thread_ts: threadInfo.ts,
-                    text: `${emoji} *Tarefa ${threadInfo.identifier} atualizada:*\n${updateText}`,
+                    text: `👤 *Tarefa ${threadInfo.identifier} foi atribuída:*\n*Assignee:* ${issue.assignee.name}`,
                     blocks: [
                         {
                             type: 'section',
                             text: {
                                 type: 'mrkdwn',
-                                text: `${emoji} *Tarefa ${threadInfo.identifier} atualizada:*\n${updateText}`
+                                text: `👤 *Tarefa ${threadInfo.identifier} foi atribuída:*\n*Assignee:* ${issue.assignee.name}`
                             }
                         },
                         {
@@ -315,14 +385,14 @@ app.post('/webhook/linear', async (req, res) => {
                             elements: [
                                 {
                                     type: 'mrkdwn',
-                                    text: `<${issue.url}|Ver no Linear> | Atualizado em ${new Date().toLocaleString('pt-BR')}`
+                                    text: `<${issue.url}|Ver no Linear> | Atribuído em ${new Date().toLocaleString('pt-BR')}`
                                 }
                             ]
                         }
                     ]
                 });
 
-                console.log(`Atualização enviada para thread ${threadInfo.ts}`);
+                console.log(`✅ Notificação de atribuição enviada para ${issue.assignee.name}`);
             }
         }
 
