@@ -267,7 +267,7 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear - APENAS progresso (esquerda → direita)
+// Webhook do Linear - APENAS notificar ao entrar em In Progress, In Review ou Done
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data, updatedFrom, action } = req.body;
@@ -295,31 +295,56 @@ app.post('/webhook/linear', async (req, res) => {
             
             const threadInfo = issueThreadMap.get(issue.id);
 
-            // Verificar mudança de estado APENAS para progresso
+            // Verificar mudança de estado - APENAS notificar em In Progress, In Review e Done
             if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
-                const currentStatePosition = issue.state.position;
-                const previousStatePosition = updatedFrom.state.position;
+                const currentState = issue.state.name;
+                const previousState = updatedFrom.state.name;
 
-                console.log(`Posição anterior: ${previousStatePosition} → Posição atual: ${currentStatePosition}`);
-                console.log(`Estado anterior: "${updatedFrom.state.name}" → Estado atual: "${issue.state.name}"`);
+                console.log(`Estado anterior: "${previousState}" → Estado atual: "${currentState}"`);
 
-                // SÓ NOTIFICAR SE HOUVE PROGRESSO (posição aumentou)
-                if (currentStatePosition > previousStatePosition) {
+                // Definir posições dos estados (ordem do workflow)
+                const stateOrder = {
+                    'todo': 1,
+                    'in progress': 2, 
+                    'in review': 3,
+                    'done': 4
+                };
+
+                // Função para obter posição do estado
+                const getStatePosition = (stateName) => {
+                    const normalizedState = stateName.toLowerCase().trim();
+                    return stateOrder[normalizedState] || 0;
+                };
+
+                const previousPosition = getStatePosition(previousState);
+                const currentPosition = getStatePosition(currentState);
+
+                console.log(`Posição anterior: ${previousPosition} → Posição atual: ${currentPosition}`);
+
+                // REGRAS ESPECÍFICAS: só notificar se ENTRAR em In Progress, In Review ou Done
+                const shouldNotify = (
+                    currentPosition > previousPosition && // Movimento para frente
+                    currentPosition >= 2 && // Estado atual é In Progress (2), In Review (3) ou Done (4)
+                    previousPosition > 0 && currentPosition > 0 // Estados válidos
+                );
+
+                if (shouldNotify) {
                     let emoji = '🚀';
+                    let actionText = 'progrediu';
                     
-                    // Emojis baseados em palavras-chave do nome do estado
-                    const stateName = issue.state.name.toLowerCase();
-                    if (stateName.includes('progress') || stateName.includes('doing') || stateName.includes('desenvolvimento')) {
+                    // Emojis específicos para cada estado de destino
+                    if (currentState.toLowerCase() === 'in progress') {
                         emoji = '🚀';
-                    } else if (stateName.includes('review') || stateName.includes('revisão') || stateName.includes('análise')) {
+                        actionText = 'entrou em desenvolvimento';
+                    } else if (currentState.toLowerCase() === 'in review') {
                         emoji = '👀';
-                    } else if (stateName.includes('test') || stateName.includes('qa') || stateName.includes('teste')) {
-                        emoji = '🧪';
-                    } else if (stateName.includes('done') || stateName.includes('completed') || stateName.includes('finalizado') || stateName.includes('concluído')) {
+                        actionText = 'entrou em revisão';
+                    } else if (currentState.toLowerCase() === 'done') {
                         emoji = '✅';
+                        actionText = 'foi concluída';
                     }
 
-                    const updateText = `*Status atualizado para:* ${issue.state.name}`;
+                    const updateText = `*Status atualizado para:* ${currentState}`;
 
                     let additionalInfo = '';
                     if (issue.assignee) {
@@ -329,13 +354,13 @@ app.post('/webhook/linear', async (req, res) => {
                     await slack.chat.postMessage({
                         channel: threadInfo.channel,
                         thread_ts: threadInfo.ts,
-                        text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`,
+                        text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`,
                         blocks: [
                             {
                                 type: 'section',
                                 text: {
                                     type: 'mrkdwn',
-                                    text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`
+                                    text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`
                                 }
                             },
                             {
@@ -343,18 +368,20 @@ app.post('/webhook/linear', async (req, res) => {
                                 elements: [
                                     {
                                         type: 'mrkdwn',
-                                        text: `<${issue.url}|Ver no Linear> | ${updatedFrom.state.name} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
+                                        text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR')}`
                                     }
                                 ]
                             }
                         ]
                     });
 
-                    console.log(`✅ Notificação de progresso enviada: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
-                } else if (currentStatePosition < previousStatePosition) {
-                    console.log(`⬅️ Movimento para trás detectado, NÃO notificando: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
+                    console.log(`✅ Notificação enviada: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition}) - ${actionText}`);
+                } else if (currentPosition < previousPosition) {
+                    console.log(`⬅️ Movimento para trás detectado, NÃO notificando: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition})`);
+                } else if (currentPosition < 2) {
+                    console.log(`ℹ️ Movimento para estado inicial (${currentState}), não notificando`);
                 } else {
-                    console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${updatedFrom.state.name}" → "${issue.state.name}"`);
+                    console.log(`ℹ️ Movimento não atende critérios de notificação: "${previousState}" → "${currentState}"`);
                 }
             } 
             // Casos onde NÃO notifica
