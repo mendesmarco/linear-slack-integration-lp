@@ -231,11 +231,9 @@ app.post('/slack/interactivity', async (req, res) => {
                     ]
                 });
 
-                // Construir link da thread do Slack (sem precisar de team:read)
-                // Usar formato padrão: workspace extraído da URL ou configuração
-                const channelInfo = await slack.conversations.info({ channel: channel_id });
-                const workspaceName = 'infinitepay'; // Substitua pelo nome do seu workspace
-                const threadUrl = `https://${workspaceName}.slack.com/archives/${channel_id}/p${message.ts.replace('.', '')}`;
+                // Construir link da thread do Slack (voltando ao método original)
+                const slackTeamInfo = await slack.team.info();
+                const threadUrl = `https://${slackTeamInfo.team.domain}.slack.com/archives/${channel_id}/p${message.ts.replace('.', '')}`;
 
                 // Atualizar descrição da issue com link da thread
                 const updatedDescription = fullDescription + `\n\n**Thread no Slack:** ${threadUrl}`;
