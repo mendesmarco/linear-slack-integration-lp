@@ -445,7 +445,7 @@ app.post('/webhook/linear', async (req, res) => {
                                     elements: [
                                         {
                                             type: 'mrkdwn',
-                                            text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR')}`
+                                            text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`
                                         }
                                     ]
                                 }
