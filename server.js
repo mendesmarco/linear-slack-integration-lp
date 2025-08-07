@@ -127,11 +127,12 @@ app.post('/slack/commands/create-task', async (req, res) => {
     }
 });
 
-// Processar submissão do formulário
+// Processar submissão do formulário e interações
 app.post('/slack/interactivity', async (req, res) => {
     try {
         const payload = JSON.parse(req.body.payload);
 
+        // Processar submissão do formulário
         if (payload.type === 'view_submission' && payload.view.callback_id === 'task_form_modal') {
             console.log('✅ Formulário submetido');
 
@@ -146,9 +147,10 @@ app.post('/slack/interactivity', async (req, res) => {
             const whichPage = values.page_block.page_input.value;
             const details = values.details_block.details_input.value;
 
-            // Obter informações do usuário
+            // Obter informações do usuário (incluindo handle)
             const userInfo = await slack.users.info({ user: user_id });
             const userName = userInfo.user.real_name || userInfo.user.name;
+            const userHandle = `<@${user_id}>`; // Handle clicável no Slack
 
             // Buscar team Landing Pages
             let landingPagesTeam = null;
@@ -182,7 +184,7 @@ app.post('/slack/interactivity', async (req, res) => {
             }
 
             // Criar descrição completa (página + detalhes)
-            let fullDescription = `Criada via Slack por ${userName}\n\n`;
+            let fullDescription = `Criada via Slack por ${userName} (${userHandle})\n\n`;
             fullDescription += `**Em qual página:** ${whichPage}\n\n`;
             fullDescription += `**Detalhes da demanda:**\n${details}`;
 
@@ -214,7 +216,7 @@ app.post('/slack/interactivity', async (req, res) => {
                             type: 'section',
                             text: {
                                 type: 'mrkdwn',
-                                text: `*Em qual página:* ${whichPage}\n*Criado por:* ${userName}`
+                                text: `*Em qual página:* ${whichPage}\n*Criado por:* ${userHandle}`
                             }
                         },
                         {
@@ -253,7 +255,9 @@ app.post('/slack/interactivity', async (req, res) => {
                     ts: message.ts,
                     issueId: issue.id,
                     identifier: issue.identifier,
-                    threadUrl: threadUrl
+                    threadUrl: threadUrl,
+                    createdBy: user_id, // Salvar ID do usuário que criou
+                    createdByHandle: userHandle // Salvar handle para mencionar
                 });
 
                 // Salvar estado inicial no cache para detectar mudanças futuras
@@ -271,6 +275,73 @@ app.post('/slack/interactivity', async (req, res) => {
                 console.log(`✅ Landing page request ${issue.identifier} criado com formulário personalizado`);
             }
         }
+        // Processar clique no botão "Aprovar"
+        else if (payload.type === 'block_actions' && payload.actions?.[0]?.action_id === 'approve_task') {
+            console.log('✅ Botão APROVAR clicado');
+
+            // Resposta imediata
+            res.status(200).send();
+
+            const action = payload.actions[0];
+            const actionData = JSON.parse(action.value);
+            const { issueId, identifier } = actionData;
+            const user = payload.user;
+
+            console.log(`Aprovando tarefa ${identifier} por ${user.name}`);
+
+            try {
+                // Buscar estados do team para encontrar "Done"
+                const issue = await linear.issue(issueId);
+                const team = await linear.team(issue.team.id);
+                const states = await team.states();
+                
+                const doneState = states.nodes.find(state => 
+                    state.name.toLowerCase() === 'done' || 
+                    state.name.toLowerCase().includes('done') ||
+                    state.name.toLowerCase().includes('completed')
+                );
+
+                if (!doneState) {
+                    throw new Error('Estado "Done" não encontrado no workflow');
+                }
+
+                // Atualizar issue no Linear para Done
+                await linear.updateIssue(issueId, {
+                    stateId: doneState.id
+                });
+
+                // Enviar confirmação na thread
+                const threadInfo = issueThreadMap.get(issueId);
+                if (threadInfo) {
+                    await slack.chat.postMessage({
+                        channel: threadInfo.channel,
+                        thread_ts: threadInfo.ts,
+                        text: `✅ Tarefa ${identifier} aprovada e movida para Done por <@${user.id}>`,
+                        blocks: [
+                            {
+                                type: 'section',
+                                text: {
+                                    type: 'mrkdwn',
+                                    text: `✅ *Tarefa ${identifier} aprovada!*\n*Aprovada por:* <@${user.id}>\n*Status:* Movida para Done`
+                                }
+                            }
+                        ]
+                    });
+                }
+
+                console.log(`✅ Tarefa ${identifier} aprovada e movida para Done`);
+
+            } catch (error) {
+                console.error('❌ Erro ao aprovar tarefa:', error);
+                
+                // Enviar erro para o usuário
+                await slack.chat.postEphemeral({
+                    channel: payload.channel.id,
+                    user: user.id,
+                    text: `❌ Erro ao aprovar tarefa: ${error.message}`
+                });
+            }
+        }
         else {
             // Outras interações (botões, etc.)
             res.status(200).send();
@@ -282,91 +353,52 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear - SUPER DEBUG
+// Webhook do Linear - Notificações inteligentes
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data, updatedFrom, action } = req.body;
-        console.log('===========================');
-        console.log('🎯 WEBHOOK LINEAR RECEBIDO');
-        console.log('===========================');
 
         if (type === 'Issue' && data) {
             const issue = data;
             
-            console.log('📋 DADOS DA ISSUE:');
-            console.log(`ID: ${issue.id}`);
-            console.log(`Identifier: ${issue.identifier}`);
-            console.log(`Title: ${issue.title}`);
-            console.log(`State: ${issue.state?.name || 'N/A'}`);
-            console.log(`Team: ${issue.team?.name} (${issue.team?.key})`);
-            
             // FILTRAR: Apenas issues do team Landing Pages
             if (issue.team && issue.team.key !== 'LAN') {
-                console.log(`❌ IGNORANDO: Issue é do team "${issue.team.name}" (${issue.team.key}), não LAN`);
+                console.log(`🔄 Issue ${issue.identifier} é do team "${issue.team.name}" (${issue.team.key}), ignorando (só processar LAN)`);
                 res.status(200).send('OK');
                 return;
             }
 
-            console.log('✅ ISSUE É DO TEAM LANDING PAGES - PROCESSANDO...');
+            console.log(`✅ Issue ${issue.identifier} é do team Landing Pages, processando...`);
             
             const threadInfo = issueThreadMap.get(issue.id);
-            
-            console.log('🔍 VERIFICAÇÃO DE MAPEAMENTO:');
-            console.log(`Issue ${issue.identifier} está mapeada?`, !!threadInfo);
-            if (threadInfo) {
-                console.log(`Canal: ${threadInfo.channel}, Thread: ${threadInfo.ts}`);
-            }
-
-            // DEBUG: Mostrar estado atual do cache antes de processar
-            console.log('💾 ESTADO ATUAL DO CACHE:');
-            console.log(`Issue ${issue.identifier} no cache:`, issueStateCache.get(issue.id) || 'NÃO EXISTE');
-            console.log('Cache completo:', Array.from(issueStateCache.entries()).map(([id, state]) => ({
-                id,
-                name: state.name,
-                timestamp: state.timestamp
-            })));
-            
-            console.log('📡 DADOS DO WEBHOOK:');
-            console.log(`Action: ${action}`);
-            console.log(`Type: ${type}`);
-            console.log(`UpdatedFrom exists: ${!!updatedFrom}`);
-            console.log(`UpdatedFrom.state: ${updatedFrom?.state?.name || 'NULL'}`);
 
             // Verificar mudança de estado usando CACHE LOCAL
             if (threadInfo && issue.state) {
                 const currentState = issue.state.name;
                 let previousState = null;
                 let isFirstTime = false;
-                let detectionMethod = '';
-
-                console.log('🔄 DETECTANDO MUDANÇA DE ESTADO:');
-                console.log(`Estado atual: "${currentState}"`);
 
                 // Tentar pegar estado anterior do Linear primeiro
                 if (updatedFrom && updatedFrom.state) {
                     previousState = updatedFrom.state.name;
-                    detectionMethod = '📡 Linear webhook';
-                    console.log(`${detectionMethod}: "${previousState}"`);
+                    console.log('📡 Usando estado anterior do Linear webhook');
                 } 
                 // Fallback: usar cache local
                 else if (issueStateCache.has(issue.id)) {
                     const cachedState = issueStateCache.get(issue.id);
                     previousState = cachedState.name;
-                    detectionMethod = '💾 Cache local';
-                    console.log(`${detectionMethod}: "${previousState}"`);
+                    console.log('💾 Usando estado anterior do cache local');
                 } else {
                     // Primeira vez - assumir que veio de "Todo"
                     if (currentState.toLowerCase() !== 'todo') {
                         previousState = 'Todo';
                         isFirstTime = true;
-                        detectionMethod = '🆕 Primeira detecção (assumindo Todo)';
-                        console.log(`${detectionMethod}: "${previousState}"`);
+                        console.log('🆕 Primeira detecção - assumindo estado anterior: Todo');
                     }
                 }
 
                 if (previousState && (previousState !== currentState || isFirstTime)) {
-                    console.log('📊 COMPARAÇÃO DE ESTADOS:');
-                    console.log(`"${previousState}" → "${currentState}"`);
+                    console.log(`Estado anterior: "${previousState}" → Estado atual: "${currentState}"`);
 
                     // Definir posições dos estados (ordem do workflow)
                     const stateOrder = {
@@ -394,12 +426,6 @@ app.post('/webhook/linear', async (req, res) => {
                         previousPosition > 0 && currentPosition > 0 // Estados válidos
                     );
 
-                    console.log('⚖️ AVALIAÇÃO DAS REGRAS:');
-                    console.log(`Movimento para frente? ${currentPosition > previousPosition}`);
-                    console.log(`Estado atual é notificável? ${currentPosition >= 2} (precisa ser >= 2)`);
-                    console.log(`Estados válidos? ${previousPosition > 0 && currentPosition > 0}`);
-                    console.log(`RESULTADO: ${shouldNotify ? '✅ DEVE NOTIFICAR' : '❌ NÃO DEVE NOTIFICAR'}`);
-
                     if (shouldNotify) {
                         let emoji = '🚀';
                         let actionText = 'progrediu';
@@ -422,78 +448,91 @@ app.post('/webhook/linear', async (req, res) => {
                         if (issue.assignee) {
                             additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
                         }
+                        // Mencionar o usuário que criou a task
+                        additionalInfo += `\n*Solicitado por:* ${threadInfo.createdByHandle}`;
 
-                        console.log('📤 ENVIANDO NOTIFICAÇÃO PARA SLACK:');
-                        console.log(`Canal: ${threadInfo.channel}`);
-                        console.log(`Thread: ${threadInfo.ts}`);
-                        console.log(`Mensagem: ${emoji} ${actionText}`);
+                        // Criar botões específicos para In Review
+                        let actionElements = [];
+                        if (currentState.toLowerCase() === 'in review') {
+                            actionElements.push({
+                                type: 'button',
+                                text: {
+                                    type: 'plain_text',
+                                    text: '✅ Aprovar'
+                                },
+                                value: JSON.stringify({
+                                    issueId: issue.id,
+                                    action: 'approve',
+                                    identifier: issue.identifier
+                                }),
+                                action_id: 'approve_task',
+                                style: 'primary'
+                            });
+                        }
+
+                        let blocks = [
+                            {
+                                type: 'section',
+                                text: {
+                                    type: 'mrkdwn',
+                                    text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`
+                                }
+                            },
+                            {
+                                type: 'context',
+                                elements: [
+                                    {
+                                        type: 'mrkdwn',
+                                        text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`
+                                    }
+                                ]
+                            }
+                        ];
+
+                        // Adicionar botões se existirem
+                        if (actionElements.length > 0) {
+                            blocks.push({
+                                type: 'actions',
+                                elements: actionElements
+                            });
+                        }
 
                         await slack.chat.postMessage({
                             channel: threadInfo.channel,
                             thread_ts: threadInfo.ts,
                             text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`,
-                            blocks: [
-                                {
-                                    type: 'section',
-                                    text: {
-                                        type: 'mrkdwn',
-                                        text: `${emoji} *Tarefa ${threadInfo.identifier} ${actionText}:*\n${updateText}${additionalInfo}`
-                                    }
-                                },
-                                {
-                                    type: 'context',
-                                    elements: [
-                                        {
-                                            type: 'mrkdwn',
-                                            text: `<${issue.url}|Ver no Linear> | ${previousState} → ${currentState} | ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`
-                                        }
-                                    ]
-                                }
-                            ]
+                            blocks: blocks
                         });
 
-                        console.log(`✅ NOTIFICAÇÃO ENVIADA COM SUCESSO!`);
-                        console.log(`"${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition}) - ${actionText}`);
+                        console.log(`✅ Notificação enviada: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition}) - ${actionText}`);
                     } else if (currentPosition < previousPosition) {
-                        console.log(`⬅️ MOVIMENTO REVERSO - NÃO NOTIFICANDO: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition})`);
+                        console.log(`⬅️ Movimento reverso - NÃO notificando: "${previousState}" (pos ${previousPosition}) → "${currentState}" (pos ${currentPosition})`);
                     } else if (currentPosition < 2) {
-                        console.log(`ℹ️ MOVIMENTO PARA ESTADO INICIAL - NÃO NOTIFICANDO: "${currentState}"`);
+                        console.log(`ℹ️ Movimento para estado inicial - NÃO notificando: "${currentState}"`);
                     } else {
-                        console.log(`ℹ️ MOVIMENTO NÃO ATENDE CRITÉRIOS: "${previousState}" → "${currentState}"`);
+                        console.log(`ℹ️ Movimento não atende critérios: "${previousState}" → "${currentState}"`);
                     }
                 } else if (!previousState) {
-                    console.log(`ℹ️ ESTADO INICIAL DETECTADO: "${currentState}"`);
+                    console.log(`ℹ️ Issue ${issue.identifier} - estado inicial detectado: "${currentState}"`);
                 } else {
-                    console.log(`ℹ️ ESTADO NÃO MUDOU: "${currentState}"`);
+                    console.log(`ℹ️ Issue ${issue.identifier} - estado não mudou: "${currentState}"`);
                 }
 
                 // SEMPRE atualizar cache com estado atual para próxima comparação
-                console.log('💾 ATUALIZANDO CACHE:');
-                console.log(`Issue ID: ${issue.id}`);
-                console.log(`Novo estado: ${currentState}`);
                 issueStateCache.set(issue.id, {
                     name: currentState,
                     timestamp: new Date().toISOString()
                 });
-                console.log('✅ Cache atualizado');
             } 
-            // Casos onde NÃO processa mudança de estado
+            // Issue não mapeada
             else if (!threadInfo) {
-                console.log(`ℹ️ Issue ${issue.identifier} NÃO ESTÁ MAPEADA (não foi criada via Slack)`);
-            } else if (!issue.state) {
-                console.log(`ℹ️ Issue ${issue.identifier} SEM ESTADO DEFINIDO`);
+                console.log(`ℹ️ Issue ${issue.identifier} não está mapeada (não foi criada via Slack)`);
             }
-        } else {
-            console.log('ℹ️ Webhook não é do tipo Issue ou sem dados');
         }
-
-        console.log('===========================');
-        console.log('🏁 PROCESSAMENTO FINALIZADO');
-        console.log('===========================');
 
         res.status(200).send('OK');
     } catch (error) {
-        console.error('❌ ERRO NO WEBHOOK:', error);
+        console.error('❌ Erro no webhook:', error);
         res.status(500).send('Erro interno');
     }
 });
