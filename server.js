@@ -267,7 +267,7 @@ app.post('/slack/interactivity', async (req, res) => {
     }
 });
 
-// Webhook do Linear - com lógica de progresso
+// Webhook do Linear - com detecção automática de progresso
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data, updatedFrom } = req.body;
@@ -278,54 +278,25 @@ app.post('/webhook/linear', async (req, res) => {
             const threadInfo = issueThreadMap.get(issue.id);
 
             if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
-                const currentState = issue.state.name.toLowerCase();
-                const previousState = updatedFrom.state.name.toLowerCase();
+                const currentStatePosition = issue.state.position;
+                const previousStatePosition = updatedFrom.state.position;
 
-                console.log(`Estado anterior: ${previousState} → Estado atual: ${currentState}`);
+                console.log(`Posição anterior: ${previousStatePosition} → Posição atual: ${currentStatePosition}`);
+                console.log(`Estado anterior: "${updatedFrom.state.name}" → Estado atual: "${issue.state.name}"`);
 
-                // Definir ordem dos estados (esquerda para direita)
-                const stateOrder = {
-                    'todo': 1,
-                    'to do': 1,
-                    'backlog': 1,
-                    'in progress': 2,
-                    'doing': 2,
-                    'in review': 3,
-                    'review': 3,
-                    'testing': 4,
-                    'done': 5,
-                    'completed': 5,
-                    'closed': 5
-                };
-
-                // Função para obter posição do estado
-                const getStatePosition = (stateName) => {
-                    const normalizedState = stateName.toLowerCase().trim();
-                    for (const [key, position] of Object.entries(stateOrder)) {
-                        if (normalizedState.includes(key)) {
-                            return position;
-                        }
-                    }
-                    return 0; // Estado desconhecido
-                };
-
-                const previousPosition = getStatePosition(previousState);
-                const currentPosition = getStatePosition(currentState);
-
-                console.log(`Posição anterior: ${previousPosition}, Posição atual: ${currentPosition}`);
-
-                // Só notificar se houve PROGRESSO (movimento para direita)
-                if (currentPosition > previousPosition && previousPosition > 0 && currentPosition > 0) {
+                // Só notificar se houve PROGRESSO (posição aumentou)
+                if (currentStatePosition > previousStatePosition) {
                     let emoji = '🚀';
                     
-                    // Emojis específicos para cada transição
-                    if (currentState.includes('progress') || currentState.includes('doing')) {
+                    // Emojis baseados em palavras-chave do nome do estado
+                    const stateName = issue.state.name.toLowerCase();
+                    if (stateName.includes('progress') || stateName.includes('doing') || stateName.includes('desenvolvimento')) {
                         emoji = '🚀';
-                    } else if (currentState.includes('review')) {
+                    } else if (stateName.includes('review') || stateName.includes('revisão') || stateName.includes('análise')) {
                         emoji = '👀';
-                    } else if (currentState.includes('testing')) {
+                    } else if (stateName.includes('test') || stateName.includes('qa') || stateName.includes('teste')) {
                         emoji = '🧪';
-                    } else if (currentState.includes('done') || currentState.includes('completed')) {
+                    } else if (stateName.includes('done') || stateName.includes('completed') || stateName.includes('finalizado') || stateName.includes('concluído')) {
                         emoji = '✅';
                     }
 
@@ -353,16 +324,18 @@ app.post('/webhook/linear', async (req, res) => {
                                 elements: [
                                     {
                                         type: 'mrkdwn',
-                                        text: `<${issue.url}|Ver no Linear> | ${previousState} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
+                                        text: `<${issue.url}|Ver no Linear> | ${updatedFrom.state.name} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
                                     }
                                 ]
                             }
                         ]
                     });
 
-                    console.log(`✅ Notificação de progresso enviada: ${previousState} → ${currentState}`);
+                    console.log(`✅ Notificação de progresso enviada: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
+                } else if (currentStatePosition < previousStatePosition) {
+                    console.log(`⬅️ Movimento para trás detectado, não notificando: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
                 } else {
-                    console.log(`⏸️ Movimento não é progresso, não notificando: ${previousState} → ${currentState}`);
+                    console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${updatedFrom.state.name}" → "${issue.state.name}"`);
                 }
             } else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
                 // Notificar apenas quando alguém é ATRIBUÍDO pela primeira vez
@@ -391,6 +364,8 @@ app.post('/webhook/linear', async (req, res) => {
                 });
 
                 console.log(`✅ Notificação de atribuição enviada para ${issue.assignee.name}`);
+            } else if (!threadInfo) {
+                console.log(`ℹ️ Issue ${issue.identifier} não está mapeada (não foi criada via Slack)`);
             }
         }
 
