@@ -5,41 +5,59 @@ const { LinearClient } = require('@linear/sdk');
 const app = express();
 app.use(express.json());
 
-// Configurações - substitua pelos seus tokens
+// Configurações
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || 'xoxb-your-slack-bot-token';
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY || 'lin_api_your-linear-api-key';
 
 const slack = new WebClient(SLACK_BOT_TOKEN);
 const linear = new LinearClient({ apiKey: LINEAR_API_KEY });
 
-// Armazenar mapeamento entre issues do Linear e threads do Slack
-// Em produção, use um banco de dados
 const issueThreadMap = new Map();
 
-// Comando Slack para criar tarefa no Linear
+// Comando Slack com MUITO debug
 app.post('/slack/commands/create-task', async (req, res) => {
     try {
+        // LOG COMPLETO do que chegou
+        console.log('=== COMANDO SLACK RECEBIDO ===');
+        console.log('Body completo:', JSON.stringify(req.body, null, 2));
+        console.log('req.body.text:', req.body.text);
+        console.log('Tipo do text:', typeof req.body.text);
+        console.log('Length do text:', req.body.text ? req.body.text.length : 'undefined');
+        console.log('Text após trim:', req.body.text ? `"${req.body.text.trim()}"` : 'undefined');
+        console.log('================================');
+
         const { text, user_id, channel_id } = req.body;
         
-        // Validar se tem texto
-        if (!text || text.trim() === '') {
+        // Validação com mais detalhes
+        if (!text) {
+            console.log('❌ Erro: text é undefined/null');
             return res.json({
                 response_type: 'ephemeral',
-                text: 'Por favor, forneça um título para a tarefa. Exemplo: `/create-task Implementar nova feature`'
+                text: 'DEBUG: Campo text está undefined/null. Por favor tente: `/create-task Implementar nova feature`'
+            });
+        }
+        
+        if (text.trim() === '') {
+            console.log('❌ Erro: text está vazio após trim');
+            return res.json({
+                response_type: 'ephemeral',
+                text: 'DEBUG: Campo text está vazio. Por favor tente: `/create-task Implementar nova feature`'
             });
         }
 
-        // Resposta imediata para o Slack
+        console.log('✅ Validação passou! Text:', `"${text.trim()}"`);
+
+        // Resposta imediata
         res.json({
             response_type: 'in_channel',
-            text: `Criando tarefa: "${text}"...`
+            text: `✅ DEBUG: Criando tarefa: "${text.trim()}"... (Length: ${text.trim().length})`
         });
 
         // Obter informações do usuário
         const userInfo = await slack.users.info({ user: user_id });
         const userName = userInfo.user.real_name || userInfo.user.name;
 
-        // Obter teams do Linear (precisamos de um team para criar a issue)
+        // Obter teams do Linear
         const teams = await linear.teams();
         const firstTeam = teams.nodes[0];
 
@@ -89,7 +107,7 @@ app.post('/slack/commands/create-task', async (req, res) => {
                 ]
             });
 
-            // Salvar mapeamento issue -> thread
+            // Salvar mapeamento
             issueThreadMap.set(issue.id, {
                 channel: channel_id,
                 ts: message.ts,
@@ -97,38 +115,34 @@ app.post('/slack/commands/create-task', async (req, res) => {
                 identifier: issue.identifier
             });
 
-            console.log(`Tarefa ${issue.identifier} criada e mapeada para thread ${message.ts}`);
+            console.log(`✅ Tarefa ${issue.identifier} criada e mapeada!`);
         }
 
     } catch (error) {
-        console.error('Erro ao criar tarefa:', error);
+        console.error('❌ ERRO COMPLETO:', error);
         
-        // Tentar enviar erro para o Slack
         try {
             await slack.chat.postMessage({
                 channel: req.body.channel_id,
                 text: `❌ Erro ao criar tarefa: ${error.message}`
             });
         } catch (slackError) {
-            console.error('Erro ao enviar mensagem de erro:', slackError);
+            console.error('❌ Erro ao enviar mensagem de erro:', slackError);
         }
     }
 });
 
-// Webhook para receber atualizações do Linear
+// Webhook do Linear (inalterado)
 app.post('/webhook/linear', async (req, res) => {
     try {
         const { type, data } = req.body;
-        
-        console.log('Webhook recebido:', type);
+        console.log('Webhook Linear recebido:', type);
 
-        // Processar apenas atualizações de issues
         if (type === 'Issue' && data) {
             const issue = data;
             const threadInfo = issueThreadMap.get(issue.id);
 
             if (threadInfo) {
-                // Determinar tipo de atualização
                 let updateText = '';
                 let emoji = '🔄';
 
@@ -145,12 +159,10 @@ app.post('/webhook/linear', async (req, res) => {
                     }
                 }
 
-                // Se tiver assignee
                 if (issue.assignee) {
                     updateText += `\n*Assignee:* ${issue.assignee.name}`;
                 }
 
-                // Enviar atualização na thread
                 await slack.chat.postMessage({
                     channel: threadInfo.channel,
                     thread_ts: threadInfo.ts,
@@ -186,7 +198,7 @@ app.post('/webhook/linear', async (req, res) => {
     }
 });
 
-// Endpoint de saúde
+// Health check
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
@@ -195,7 +207,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Endpoint para listar mapeamentos (debug)
+// Debug mappings
 app.get('/debug/mappings', (req, res) => {
     const mappings = Array.from(issueThreadMap.entries()).map(([id, info]) => ({
         issueId: id,
