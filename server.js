@@ -294,66 +294,109 @@ app.post('/webhook/linear', async (req, res) => {
 
             const threadInfo = issueThreadMap.get(issue.id);
 
-            // Se a issue tem mudança de estado
-            if (threadInfo && issue.state && updatedFrom && updatedFrom.state) {
-                const currentStatePosition = issue.state.position;
-                const previousStatePosition = updatedFrom.state.position;
-
-                console.log(`Posição anterior: ${previousStatePosition} → Posição atual: ${currentStatePosition}`);
-                console.log(`Estado anterior: "${updatedFrom.state.name}" → Estado atual: "${issue.state.name}"`);
-
-                // Só notificar se houve PROGRESSO (posição aumentou)
-                if (currentStatePosition > previousStatePosition) {
-                    let emoji = '🚀';
-                    
-                    // Emojis baseados em palavras-chave do nome do estado
-                    const stateName = issue.state.name.toLowerCase();
-                    if (stateName.includes('progress') || stateName.includes('doing') || stateName.includes('desenvolvimento')) {
-                        emoji = '🚀';
-                    } else if (stateName.includes('review') || stateName.includes('revisão') || stateName.includes('análise')) {
-                        emoji = '👀';
-                    } else if (stateName.includes('test') || stateName.includes('qa') || stateName.includes('teste')) {
-                        emoji = '🧪';
-                    } else if (stateName.includes('done') || stateName.includes('completed') || stateName.includes('finalizado') || stateName.includes('concluído')) {
-                        emoji = '✅';
-                    }
-
-                    const updateText = `*Status atualizado para:* ${issue.state.name}`;
-
-                    let additionalInfo = '';
-                    if (issue.assignee) {
-                        additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
-                    }
-
-                    await slack.chat.postMessage({
-                        channel: threadInfo.channel,
-                        thread_ts: threadInfo.ts,
-                        text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`,
-                        blocks: [
-                            {
-                                type: 'section',
-                                text: {
-                                    type: 'mrkdwn',
-                                    text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`
-                                }
-                            },
-                            {
-                                type: 'context',
-                                elements: [
-                                    {
-                                        type: 'mrkdwn',
-                                        text: `<${issue.url}|Ver no Linear> | ${updatedFrom.state.name} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
-                                    }
-                                ]
-                            }
-                        ]
+            // Detectar mudança de estado consultando histórico do Linear
+            if (threadInfo && issue.state) {
+                console.log('🔍 Consultando histórico da issue no Linear...');
+                
+                try {
+                    // Buscar histórico de mudanças da issue
+                    const issueWithHistory = await linear.issue(issue.id, {
+                        includeHistory: true
                     });
 
-                    console.log(`✅ Notificação de progresso enviada: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
-                } else if (currentStatePosition < previousStatePosition) {
-                    console.log(`⬅️ Movimento para trás detectado, não notificando: "${updatedFrom.state.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
-                } else {
-                    console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${updatedFrom.state.name}" → "${issue.state.name}"`);
+                    // Pegar as últimas atividades da issue
+                    const activities = await linear.issueHistory(issue.id, { first: 10 });
+                    
+                    console.log('📋 Histórico obtido:', activities.nodes?.length || 0, 'atividades');
+
+                    // Procurar a mudança de estado mais recente (antes da atual)
+                    let previousStateData = null;
+                    
+                    for (const activity of (activities.nodes || [])) {
+                        if (activity.type === 'IssueHistory' && 
+                            activity.changes?.find(change => change.field === 'stateId')) {
+                            
+                            const stateChange = activity.changes.find(change => change.field === 'stateId');
+                            if (stateChange && stateChange.from) {
+                                // Buscar detalhes do estado anterior
+                                const previousState = await linear.workflowState(stateChange.from);
+                                previousStateData = {
+                                    position: previousState.position,
+                                    name: previousState.name
+                                };
+                                console.log('📊 Estado anterior encontrado:', previousStateData);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (previousStateData) {
+                        const currentStatePosition = issue.state.position;
+                        const previousStatePosition = previousStateData.position;
+
+                        console.log(`Posição anterior: ${previousStatePosition} → Posição atual: ${currentStatePosition}`);
+                        console.log(`Estado anterior: "${previousStateData.name}" → Estado atual: "${issue.state.name}"`);
+
+                        // Só notificar se houve PROGRESSO (posição aumentou)
+                        if (currentStatePosition > previousStatePosition) {
+                            let emoji = '🚀';
+                            
+                            // Emojis baseados em palavras-chave do nome do estado
+                            const stateName = issue.state.name.toLowerCase();
+                            if (stateName.includes('progress') || stateName.includes('doing') || stateName.includes('desenvolvimento')) {
+                                emoji = '🚀';
+                            } else if (stateName.includes('review') || stateName.includes('revisão') || stateName.includes('análise')) {
+                                emoji = '👀';
+                            } else if (stateName.includes('test') || stateName.includes('qa') || stateName.includes('teste')) {
+                                emoji = '🧪';
+                            } else if (stateName.includes('done') || stateName.includes('completed') || stateName.includes('finalizado') || stateName.includes('concluído')) {
+                                emoji = '✅';
+                            }
+
+                            const updateText = `*Status atualizado para:* ${issue.state.name}`;
+
+                            let additionalInfo = '';
+                            if (issue.assignee) {
+                                additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
+                            }
+
+                            await slack.chat.postMessage({
+                                channel: threadInfo.channel,
+                                thread_ts: threadInfo.ts,
+                                text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`,
+                                blocks: [
+                                    {
+                                        type: 'section',
+                                        text: {
+                                            type: 'mrkdwn',
+                                            text: `${emoji} *Tarefa ${threadInfo.identifier} progrediu:*\n${updateText}${additionalInfo}`
+                                        }
+                                    },
+                                    {
+                                        type: 'context',
+                                        elements: [
+                                            {
+                                                type: 'mrkdwn',
+                                                text: `<${issue.url}|Ver no Linear> | ${previousStateData.name} → ${issue.state.name} | ${new Date().toLocaleString('pt-BR')}`
+                                            }
+                                        ]
+                                    }
+                                ]
+                            });
+
+                            console.log(`✅ Notificação de progresso enviada: "${previousStateData.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
+                        } else if (currentStatePosition < previousStatePosition) {
+                            console.log(`⬅️ Movimento para trás detectado, não notificando: "${previousStateData.name}" (pos ${previousStatePosition}) → "${issue.state.name}" (pos ${currentStatePosition})`);
+                        } else {
+                            console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${previousStateData.name}" → "${issue.state.name}"`);
+                        }
+                    } else {
+                        console.log('ℹ️ Não foi possível encontrar estado anterior no histórico');
+                    }
+
+                } catch (historyError) {
+                    console.error('❌ Erro ao consultar histórico do Linear:', historyError);
+                    console.log('ℹ️ Continuando sem notificação...');
                 }
             } 
             // Se a issue foi atribuída
