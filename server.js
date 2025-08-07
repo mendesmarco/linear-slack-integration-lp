@@ -46,22 +46,45 @@ app.post('/slack/commands/create-task', async (req, res) => {
         const userInfo = await slack.users.info({ user: user_id });
         const userName = userInfo.user.real_name || userInfo.user.name;
 
-        // Buscar team Landing Pages por identificador
-        const teams = await linear.teams();
-        const landingPagesTeam = teams.nodes.find(team => 
-            team.name === 'Landing Pages' || team.key === 'LAN'
-        );
+        // Buscar team Landing Pages com paginação
+        let landingPagesTeam = null;
+        let hasNextPage = true;
+        let cursor = null;
+
+        console.log('🔍 Procurando team Landing Pages...');
+
+        while (hasNextPage && !landingPagesTeam) {
+            const teamsPage = await linear.teams({ 
+                first: 50,
+                after: cursor 
+            });
+
+            // Procurar o team na página atual
+            landingPagesTeam = teamsPage.nodes.find(team => 
+                team.name === 'Landing Pages' || 
+                team.key === 'LAN' ||
+                team.name.toLowerCase().includes('landing pages')
+            );
+
+            if (landingPagesTeam) {
+                console.log('✅ Team encontrado:', landingPagesTeam.name, 'Key:', landingPagesTeam.key, 'ID:', landingPagesTeam.id);
+                break;
+            }
+
+            // Verificar se há próxima página
+            hasNextPage = teamsPage.pageInfo.hasNextPage;
+            cursor = teamsPage.pageInfo.endCursor;
+
+            console.log(`📄 Página processada, próxima: ${hasNextPage}`);
+        }
 
         if (!landingPagesTeam) {
-            console.log('Teams disponíveis:', teams.nodes.map(t => `${t.name} (${t.key})`).join(', '));
             await slack.chat.postMessage({
                 channel: channel_id,
-                text: `❌ Erro: Team "Landing Pages" não encontrado nos primeiros resultados. Pode estar em páginas seguintes da API.`
+                text: `❌ Erro: Team "Landing Pages" não encontrado em nenhuma das páginas. Verifique se o nome está correto.`
             });
             return;
         }
-
-        console.log('✅ Team encontrado:', landingPagesTeam.name, 'ID:', landingPagesTeam.id);
 
         console.log('✅ Criando issue no Linear...');
 
