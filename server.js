@@ -270,8 +270,16 @@ app.post('/slack/interactivity', async (req, res) => {
 // Webhook do Linear - APENAS progresso (esquerda → direita)
 app.post('/webhook/linear', async (req, res) => {
     try {
-        const { type, data, updatedFrom } = req.body;
+        const { type, data, updatedFrom, action } = req.body;
         console.log('Webhook Linear recebido:', type);
+
+        // LOG COMPLETO DO PAYLOAD PARA DEBUG
+        console.log('=== DEBUG WEBHOOK COMPLETO ===');
+        console.log('Action:', action);
+        console.log('Data issue state:', data?.state ? `${data.state.name} (pos: ${data.state.position})` : 'null');
+        console.log('UpdatedFrom state:', updatedFrom?.state ? `${updatedFrom.state.name} (pos: ${updatedFrom.state.position})` : 'null');
+        console.log('UpdatedFrom completo:', JSON.stringify(updatedFrom, null, 2));
+        console.log('===============================');
 
         if (type === 'Issue' && data) {
             const issue = data;
@@ -349,6 +357,13 @@ app.post('/webhook/linear', async (req, res) => {
                     console.log(`➡️ Movimento lateral (mesma posição), não notificando: "${updatedFrom.state.name}" → "${issue.state.name}"`);
                 }
             } 
+            // Casos onde NÃO notifica
+            else if (threadInfo && !updatedFrom) {
+                console.log(`ℹ️ Issue ${issue.identifier} - webhook sem 'updatedFrom', não é mudança de estado`);
+            }
+            else if (threadInfo && !updatedFrom?.state) {
+                console.log(`ℹ️ Issue ${issue.identifier} - updatedFrom existe mas sem 'state', não é mudança de estado`);
+            }
             // Notificar atribuições
             else if (threadInfo && issue.assignee && updatedFrom && !updatedFrom.assignee) {
                 await slack.chat.postMessage({
