@@ -290,14 +290,10 @@ app.post('/slack/interactivity', async (req, res) => {
             console.log(`Aprovando tarefa ${identifier} por ${user.name}`);
 
             try {
-                // Buscar issue para pegar informações do team
-                const issueData = await linear.issue(issueId);
+                // Buscar estados diretamente usando a API do Linear
+                const allStates = await linear.workflowStates();
                 
-                // Buscar estados do team para encontrar "Done"
-                const team = await linear.team(issueData.team.id);
-                const states = await team.states();
-                
-                const doneState = states.nodes.find(state => 
+                const doneState = allStates.nodes.find(state => 
                     state.name.toLowerCase() === 'done' || 
                     state.name.toLowerCase().includes('done') ||
                     state.name.toLowerCase().includes('completed')
@@ -306,6 +302,8 @@ app.post('/slack/interactivity', async (req, res) => {
                 if (!doneState) {
                     throw new Error('Estado "Done" não encontrado no workflow');
                 }
+
+                console.log('Estado Done encontrado:', doneState.name, 'ID:', doneState.id);
 
                 // Atualizar issue no Linear para Done
                 await linear.updateIssue(issueId, {
@@ -449,11 +447,6 @@ app.post('/webhook/linear', async (req, res) => {
                         let additionalInfo = '';
                         if (issue.assignee) {
                             additionalInfo += `\n*Assignee:* ${issue.assignee.name}`;
-                        }
-                        
-                        // Para In Progress, mostrar quem atribuiu se houver assignee
-                        if (currentState.toLowerCase() === 'in progress' && issue.assignee) {
-                            additionalInfo += `\n*Atribuído para desenvolvimento*`;
                         }
                         
                         // Mencionar o usuário que criou a task (sem "Solicitado por")
