@@ -290,20 +290,26 @@ app.post('/slack/interactivity', async (req, res) => {
             console.log(`Aprovando tarefa ${identifier} por ${user.name}`);
 
             try {
-                // Buscar estados diretamente usando a API do Linear
-                const allStates = await linear.workflowStates();
+                // Buscar a issue primeiro para pegar o team ID
+                const issueData = await linear.issue(issueId);
+                console.log('Issue encontrada:', issueData.identifier, 'Team:', issueData.team.name);
                 
-                const doneState = allStates.nodes.find(state => 
+                // Buscar estados APENAS do team Landing Pages
+                const teamStates = await linear.team(issueData.team.id).then(team => team.states());
+                
+                console.log('Estados do team:', teamStates.nodes.map(s => s.name).join(', '));
+                
+                const doneState = teamStates.nodes.find(state => 
                     state.name.toLowerCase() === 'done' || 
                     state.name.toLowerCase().includes('done') ||
                     state.name.toLowerCase().includes('completed')
                 );
 
                 if (!doneState) {
-                    throw new Error('Estado "Done" não encontrado no workflow');
+                    throw new Error(`Estado "Done" não encontrado no team ${issueData.team.name}. Estados disponíveis: ${teamStates.nodes.map(s => s.name).join(', ')}`);
                 }
 
-                console.log('Estado Done encontrado:', doneState.name, 'ID:', doneState.id);
+                console.log('Estado Done do team correto encontrado:', doneState.name, 'ID:', doneState.id);
 
                 // Atualizar issue no Linear para Done
                 await linear.updateIssue(issueId, {
