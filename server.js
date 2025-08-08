@@ -290,52 +290,76 @@ app.post('/slack/interactivity', async (req, res) => {
             console.log(`Aprovando tarefa ${identifier} por ${user.name}`);
 
             try {
-                // Buscar a issue primeiro para pegar o team ID
-                const issueData = await linear.issue(issueId);
-                console.log('Issue encontrada:', issueData.identifier, 'Team:', issueData.team.name);
+                console.log('Movendo issue para Done:', issueId);
+
+                // Forma mais simples: usar mutation direta do GraphQL
+                const mutation = `
+                    mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+                        issueUpdate(id: $id, input: $input) {
+                            success
+                            issue {
+                                id
+                                identifier
+                                state {
+                                    name
+                                }
+                            }
+                        }
+                    }
+                `;
+
+                // Buscar estados do team Landing Pages usando query direta
+                const statesQuery = `
+                    query GetTeamStates {
+                        teams(filter: { key: { eq: "LAN" } }) {
+                            nodes {
+                                id
+                                name
+                                states {
+                                    nodes {
+                                        id
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                    }
+                `;
+
+                // Executar query para pegar estados
+                const statesResult = await linear._client.request(statesQuery);
+                const lanTeam = statesResult.teams.nodes[0];
                 
-                // Buscar estados APENAS do team Landing Pages
-                const teamStates = await linear.team(issueData.team.id).then(team => team.states());
-                
-                console.log('Estados do team:', teamStates.nodes.map(s => s.name).join(', '));
-                
-                const doneState = teamStates.nodes.find(state => 
-                    state.name.toLowerCase() === 'done' || 
-                    state.name.toLowerCase().includes('done') ||
-                    state.name.toLowerCase().includes('completed')
+                if (!lanTeam) {
+                    throw new Error('Team Landing Pages não encontrado');
+                }
+
+                const doneState = lanTeam.states.nodes.find(state => 
+                    state.name.toLowerCase() === 'done'
                 );
 
                 if (!doneState) {
-                    throw new Error(`Estado "Done" não encontrado no team ${issueData.team.name}. Estados disponíveis: ${teamStates.nodes.map(s => s.name).join(', ')}`);
+                    throw new Error('Estado Done não encontrado no team Landing Pages');
                 }
 
-                console.log('Estado Done do team correto encontrado:', doneState.name, 'ID:', doneState.id);
+                console.log('Estado Done encontrado:', doneState.name, 'ID:', doneState.id);
 
-                // Atualizar issue no Linear para Done
-                await linear.updateIssue(issueId, {
-                    stateId: doneState.id
+                // Executar mutation para atualizar
+                const result = await linear._client.request(mutation, {
+                    id: issueId,
+                    input: {
+                        stateId: doneState.id
+                    }
                 });
 
-                // Enviar confirmação na thread
-                const threadInfo = issueThreadMap.get(issueId);
-                if (threadInfo) {
-                    await slack.chat.postMessage({
-                        channel: threadInfo.channel,
-                        thread_ts: threadInfo.ts,
-                        text: `✅ Tarefa ${identifier} aprovada e movida para Done por <@${user.id}>`,
-                        blocks: [
-                            {
-                                type: 'section',
-                                text: {
-                                    type: 'mrkdwn',
-                                    text: `✅ *Tarefa ${identifier} aprovada!*\n*Aprovada por:* <@${user.id}>\n*Status:* Movida para Done`
-                                }
-                            }
-                        ]
-                    });
+                if (result.issueUpdate.success) {
+                    console.log(`✅ Issue ${identifier} movida para Done com sucesso`);
+                    
+                    // NÃO enviar mensagem aqui - o webhook vai fazer isso automaticamente
+                    
+                } else {
+                    throw new Error('Falha ao atualizar issue no Linear');
                 }
-
-                console.log(`✅ Tarefa ${identifier} aprovada e movida para Done`);
 
             } catch (error) {
                 console.error('❌ Erro ao aprovar tarefa:', error);
